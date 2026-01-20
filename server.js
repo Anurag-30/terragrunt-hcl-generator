@@ -10,12 +10,16 @@ const port = 3001;
 app.use(cors());
 app.use(bodyParser.json());
 
-// Helper to escape shell arguments basic (wraps in quotes)
+// Helper to escape shell arguments using SINGLE QUOTES (Stronger escaping)
+// preventing variable expansion ($) or backslash interpretation.
+// 'value' -> 'value'
+// 'val'ue' -> 'val'\''ue'
 const escapeShell = (cmd) => {
-    return '"' + cmd.replace(/(["\s'$`\\])/g, '\\$1') + '"';
+    if (typeof cmd !== 'string') return "''";
+    return "'" + cmd.replace(/'/g, "'\\''") + "'";
 };
 
-// Helper: Backslash escape spaces (NO quotes)
+// Helper: Backslash escape spaces (NO quotes) - for paths if needed
 const escapeSpaces = (str) => {
     return str.replace(/ /g, '\\ ');
 };
@@ -23,7 +27,8 @@ const escapeSpaces = (str) => {
 // Helper to mask password in logs
 const maskPassword = (str) => {
     if (!str) return str;
-    return str.replace(/GOVC_PASSWORD=["']?([^"'\s]+)["']?/g, 'GOVC_PASSWORD=******');
+    // Mask export GOVC_PASSWORD='...'
+    return str.replace(/GOVC_PASSWORD='([^']+)'/g, 'GOVC_PASSWORD=******');
 };
 
 const runGovc = (commandStr, envVars) => {
@@ -31,16 +36,32 @@ const runGovc = (commandStr, envVars) => {
         const { url, username, password } = envVars;
         const govcPath = 'govc';
 
-        // REVERT: Explicit inline export of all variables for every command
-        const fullCmd = `GOVC_INSECURE=1 GOVC_URL=${escapeShell(url)} GOVC_USERNAME=${escapeShell(username)} GOVC_PASSWORD=${escapeShell(password)} ${govcPath} ${commandStr}`;
-        const logCmd = `GOVC_INSECURE=1 GOVC_URL=${escapeShell(url)} GOVC_USERNAME=${escapeShell(username)} GOVC_PASSWORD=****** ${govcPath} ${commandStr}`;
+        // METHOD: Explicit EXPORT syntax with SINGLE QUOTES
+        // This handles passwords with special chars (!, $, #) correctly.
+        const cmdChain = `
+export GOVC_INSECURE=1;
+export GOVC_URL=${escapeShell(url)};
+export GOVC_USERNAME=${escapeShell(username)};
+export GOVC_PASSWORD=${escapeShell(password)};
+${govcPath} ${commandStr}
+`;
+
+        // Flatten for logging/execution
+        const fullCmd = cmdChain.replace(/\n/g, ' ').trim();
+
+        const logCmd = fullCmd.replace(/GOVC_PASSWORD='([^']+)'/g, 'GOVC_PASSWORD=******');
 
         console.log(`Executing: ${logCmd}`);
 
-        // Keep the increased timeout and buffer
         exec(fullCmd, { maxBuffer: 1024 * 1024 * 10, timeout: 60000 }, (error, stdout, stderr) => {
             if (error) {
-                console.error(`Error: ${maskPassword(error.toString())}`);
+                const msg = error.toString();
+                // Check if it's the specific SSL syscall error or EOF
+                if (msg.includes('SSL_ERROR_SYSCALL') || msg.includes('EOF')) {
+                    console.error("Network/SSL Error detected. Check VPN or Proxy.");
+                }
+
+                console.error(`Error: ${maskPassword(msg)}`);
                 if (stderr) console.error(`Stderr: ${maskPassword(stderr)}`);
                 return reject({ error, stderr });
             }
@@ -57,25 +78,35 @@ app.post('/api/get-dpg-id', async (req, res) => {
     }
 
     try {
-        // Strategy: Scoped Search (DC first, then Network in DC) to reduce load.
-        // This logic is good, we just change HOW we run it (via explicit env vars).
-
+        // Step 1: Find Datacenter (Scoped)
         console.log(`Locating Datacenter '${datacenter}'...`);
-        const dcFindCmd = `find / -type Datacenter -name "${datacenter}"`;
+        const dcFindCmd = `find / -type Datacenter -name ${escapeShell(datacenter)}`;
         const dcOutput = await runGovc(dcFindCmd, { url, username, password });
 
         if (!dcOutput) return res.status(404).json({ error: `Datacenter '${datacenter}' not found.` });
-        const dcPath = dcOutput.split('\n')[0].trim();
 
+        // Take the first matching DC path
+        const dcPath = dcOutput.split('\n')[0].trim();
+        console.log(`Found DC Path: ${dcPath}`);
+
+        // Step 2: Find Network INSIDE that DC
         console.log(`Locating Network '${network}' in ${dcPath}...`);
-        const netFindCmd = `find "${dcPath}" -type n -name "${network}"`;
+
+        // IMPORTANT: The path to find in (dcPath) must be passed carefully.
+        // We do NOT use escapeShell on dcPath here because we want to format it into the find command?
+        // Actually, `find "PATH"` works. 
+        // We will simple quote the dcPath.
+        const netFindCmd = `find ${escapeShell(dcPath)} -type n -name ${escapeShell(network)}`;
         const netOutput = await runGovc(netFindCmd, { url, username, password });
 
         if (!netOutput) return res.status(404).json({ error: `Network '${network}' not found in DC.` });
-        const netPath = netOutput.split('\n')[0].trim();
 
-        // Get ID
-        const lsCmd = `ls -i "${netPath}"`;
+        const netPath = netOutput.split('\n')[0].trim();
+        console.log(`Found Network Path: ${netPath}`);
+
+        // Step 3: Get ID
+        // ls -i "path"
+        const lsCmd = `ls -i ${escapeShell(netPath)}`;
         const lsOutput = await runGovc(lsCmd, { url, username, password });
 
         const firstToken = lsOutput.split(/\s+/)[0];
@@ -94,6 +125,7 @@ app.post('/api/check-datastore', async (req, res) => {
         return res.status(400).json({ error: 'Missing required fields' });
     }
 
+    // Verify -dc flag logic
     let dcArg = '';
     if (datacenter) {
         dcArg = `-dc=${escapeShell(datacenter)}`;
