@@ -87,6 +87,7 @@ function VMCard({ vm, index, updateVM, removeVM, isOnly, serverType, onDBSizeCha
                     url: fsCredentials.url,
                     username: fsCredentials.username,
                     password: fsCredentials.password,
+                    datacenter: vm.datacenter,
                     datastore: datastoreName
                 })
             });

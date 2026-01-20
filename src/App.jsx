@@ -65,14 +65,36 @@ const INITIAL_STATE = {
 };
 
 function App() {
-  const [formData, setFormData] = useState(INITIAL_STATE);
-  const [serverType, setServerType] = useState('db');
+  // Load initial state from localStorage if available
+  const [formData, setFormData] = useState(() => {
+    const saved = localStorage.getItem('hcl_form_data');
+    return saved ? JSON.parse(saved) : INITIAL_STATE;
+  });
+
+  const [serverType, setServerType] = useState(() => {
+    return localStorage.getItem('hcl_server_type') || 'db';
+  });
+
   const [generatedCode, setGeneratedCode] = useState('');
 
-  // Credentials for Backend
-  const [vcenterUsername, setVcenterUsername] = useState('user@example.com');
-  const [vcenterPassword, setVcenterPassword] = useState('');
-  const [govcUrl, setGovcUrl] = useState('https://vcenter.example.com');
+  // Credentials for Backend (Load from local storage too?)
+  const [vcenterUsername, setVcenterUsername] = useState(() => localStorage.getItem('hcl_vc_user') || 'user@example.com');
+  // Password usually shouldn't be auto-saved, but for convenience in this specific tool context:
+  const [vcenterPassword, setVcenterPassword] = useState(() => localStorage.getItem('hcl_vc_pass') || '');
+
+  // Persist Data
+  useEffect(() => {
+    localStorage.setItem('hcl_form_data', JSON.stringify(formData));
+  }, [formData]);
+
+  useEffect(() => {
+    localStorage.setItem('hcl_server_type', serverType);
+  }, [serverType]);
+
+  useEffect(() => {
+    localStorage.setItem('hcl_vc_user', vcenterUsername);
+    localStorage.setItem('hcl_vc_pass', vcenterPassword);
+  }, [vcenterUsername, vcenterPassword]);
 
   const handleInputChange = (field, value) => {
     setFormData(prev => ({ ...prev, [field]: value }));
