@@ -64,6 +64,51 @@ function VMCard({ vm, index, updateVM, removeVM, isOnly, serverType, onDBSizeCha
         }
     };
 
+    const handleCheckDatastore = async (datastoreName) => {
+        if (!fsCredentials.password) {
+            alert("Please enter VCenter Credentials at the top first.");
+            return;
+        }
+        if (!datastoreName) {
+            alert("Enter a datastore name first.");
+            return;
+        }
+
+        try {
+            // Calculate Total Requested Size for this VM
+            const rootSize = parseInt(vm.root_disk_size || 0);
+            const additionalSize = (vm.additional_disks || []).reduce((acc, d) => acc + parseInt(d.size || 0), 0);
+            const totalRequestedGB = rootSize + additionalSize;
+
+            const response = await fetch('/api/check-datastore', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    url: fsCredentials.url,
+                    username: fsCredentials.username,
+                    password: fsCredentials.password,
+                    datastore: datastoreName
+                })
+            });
+
+            const data = await response.json();
+            if (data.error) {
+                alert("Error checking datastore: " + data.error);
+            } else {
+                const free = parseFloat(data.freeGB);
+                const status = free > totalRequestedGB ? "✅ OK" : "❌ INSUFFICIENT";
+                alert(
+                    `Datastore: ${data.name}\n` +
+                    `Free Space: ${data.freeGB} GB\n` +
+                    `This VM Needs: ~${totalRequestedGB} GB\n` +
+                    `Status: ${status}`
+                );
+            }
+        } catch (e) {
+            alert("Failed to check datastore: " + e.message);
+        }
+    };
+
     const addDisk = () => {
         const newDisk = {
             id: Date.now(),
@@ -130,7 +175,13 @@ function VMCard({ vm, index, updateVM, removeVM, isOnly, serverType, onDBSizeCha
                             </div>
                             {dpgError && <span style={{ color: 'red', fontSize: '0.8rem' }}>{dpgError}</span>}
                         </div>
-                        <div><label>Datastore</label><input value={vm.datastore} onChange={e => handleChange('datastore', e.target.value)} /></div>
+                        <div>
+                            <label>Datastore</label>
+                            <div className="flex" style={{ gap: '0.5rem' }}>
+                                <input value={vm.datastore} onChange={e => handleChange('datastore', e.target.value)} />
+                                <button className="secondary" style={{ whiteSpace: 'nowrap', fontSize: '0.8rem' }} onClick={() => handleCheckDatastore(vm.datastore)}>Check Cap</button>
+                            </div>
+                        </div>
                     </div>
 
                     <div className="grid">
