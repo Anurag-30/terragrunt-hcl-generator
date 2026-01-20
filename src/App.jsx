@@ -165,12 +165,20 @@ function App() {
 
   // VM Management
   const addVM = () => {
-    const newVM = { ...INITIAL_STATE.vms[0], id: Date.now() };
-    if (serverType === 'db') {
-      newVM.additional_disks = generateInitialDBDisks(100, 500, 500);
-    } else {
-      newVM.additional_disks = [];
+    // Clone from the first VM instead of using hardcoded defaults
+    const templateVM = formData.vms.length > 0 ? formData.vms[0] : INITIAL_STATE.vms[0];
+    const newVM = {
+      ...templateVM,
+      id: Date.now(),
+      // Clear hostname to avoid duplicates
+      vm_hostname: templateVM.vm_hostname ? templateVM.vm_hostname.replace(/\d+$/, '') + (formData.vms.length + 1) : 'HOSTNAME' + (formData.vms.length + 1)
+    };
+
+    // Deep clone additional_disks to avoid reference issues
+    if (templateVM.additional_disks) {
+      newVM.additional_disks = JSON.parse(JSON.stringify(templateVM.additional_disks));
     }
+
     setFormData(prev => ({ ...prev, vms: [...prev.vms, newVM] }));
   };
 
@@ -303,6 +311,7 @@ function App() {
                 isOnly={formData.vms.length === 1}
                 serverType={serverType}
                 onDBSizeChange={(type, val) => handleDBSizeChange(index, type, val)}
+                allVMs={formData.vms}
                 fsCredentials={{
                   url: `https://${formData.vcenter_server}`,
                   username: vcenterUsername,

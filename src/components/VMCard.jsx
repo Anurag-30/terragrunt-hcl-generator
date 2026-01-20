@@ -1,7 +1,7 @@
 
 import React, { useState } from 'react';
 
-function VMCard({ vm, index, updateVM, removeVM, isOnly, serverType, onDBSizeChange, fsCredentials }) {
+function VMCard({ vm, index, updateVM, removeVM, isOnly, serverType, onDBSizeChange, fsCredentials, allVMs }) {
     const [expanded, setExpanded] = useState(true);
     const [dpgLoading, setDpgLoading] = useState(false);
     const [dpgError, setDpgError] = useState('');
@@ -70,20 +70,25 @@ function VMCard({ vm, index, updateVM, removeVM, isOnly, serverType, onDBSizeCha
         }
 
         try {
-            // Calculate Total Requested Size for this VM
-            // Sum ALL disks that use this specific datastore (root + additional)
+            // Calculate Total Requested Size ACROSS ALL VMs for this datastore
             let totalRequestedGB = 0;
+            let totalDiskCount = 0;
 
-            // Check root disk datastore
-            if (vm.datastore === datastoreName) {
-                totalRequestedGB += parseInt(vm.root_disk_size || 0);
-            }
-
-            // Check all additional disks
-            (vm.additional_disks || []).forEach(disk => {
-                if (disk.datastore === datastoreName) {
-                    totalRequestedGB += parseInt(disk.size || 0);
+            // Iterate through ALL VMs
+            (allVMs || []).forEach(vmItem => {
+                // Check root disk datastore
+                if (vmItem.datastore === datastoreName) {
+                    totalRequestedGB += parseInt(vmItem.root_disk_size || 0);
+                    totalDiskCount++;
                 }
+
+                // Check all additional disks
+                (vmItem.additional_disks || []).forEach(disk => {
+                    if (disk.datastore === datastoreName) {
+                        totalRequestedGB += parseInt(disk.size || 0);
+                        totalDiskCount++;
+                    }
+                });
             });
 
             const response = await fetch('/api/check-datastore', {
@@ -105,15 +110,10 @@ function VMCard({ vm, index, updateVM, removeVM, isOnly, serverType, onDBSizeCha
                 const free = parseFloat(data.freeGB);
                 const status = free > totalRequestedGB ? "✅ OK" : "❌ INSUFFICIENT";
 
-                // Count how many disks use this datastore
-                let diskCount = 0;
-                if (vm.datastore === datastoreName) diskCount++;
-                diskCount += (vm.additional_disks || []).filter(d => d.datastore === datastoreName).length;
-
                 alert(
                     `Datastore: ${data.name}\n` +
                     `Free Space: ${data.freeGB} GB\n` +
-                    `This VM Needs: ~${totalRequestedGB} GB (across ${diskCount} disk${diskCount > 1 ? 's' : ''})\n` +
+                    `Total Needed (All VMs): ~${totalRequestedGB} GB (across ${totalDiskCount} disk${totalDiskCount > 1 ? 's' : ''})\n` +
                     `Status: ${status}`
                 );
             }
