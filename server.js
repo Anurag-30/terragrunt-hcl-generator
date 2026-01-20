@@ -11,9 +11,14 @@ const port = 3001;
 app.use(cors());
 app.use(bodyParser.json());
 
-// Helper to escape shell arguments basic
+// Helper to escape shell arguments basic (wraps in quotes)
 const escapeShell = (cmd) => {
     return '"' + cmd.replace(/(["\s'$`\\])/g, '\\$1') + '"';
+};
+
+// Helper: Backslash escape spaces (NO quotes)
+const escapeSpaces = (str) => {
+    return str.replace(/ /g, '\\ ');
 };
 
 // Helper to mask password in logs
@@ -22,7 +27,7 @@ const maskPassword = (str) => {
     return str.replace(/GOVC_PASSWORD=["']?([^"'\s]+)["']?/g, 'GOVC_PASSWORD=******');
 };
 
-// Generic helper to execute command with env vars
+// Helper to run govc command with promise
 const runGovc = (commandStr, envVars) => {
     return new Promise((resolve, reject) => {
         const { url, username, password } = envVars;
@@ -33,7 +38,8 @@ const runGovc = (commandStr, envVars) => {
 
         console.log(`Executing: ${logCmd}`);
 
-        exec(fullCmd, (error, stdout, stderr) => {
+        // Increase maxBuffer to 10MB to handle large find outputs
+        exec(fullCmd, { maxBuffer: 1024 * 1024 * 10 }, (error, stdout, stderr) => {
             if (error) {
                 console.error(`Error: ${maskPassword(error.toString())}`);
                 if (stderr) console.error(`Stderr: ${maskPassword(stderr)}`);
@@ -51,55 +57,68 @@ app.post('/api/get-dpg-id', async (req, res) => {
         return res.status(400).json({ error: 'Missing required fields' });
     }
 
-    // Step 1: Find the network path dynamically using `govc find`
-    // This handles nested folders/datacenters and spacing issues by discovering the real path.
-    // We search for type 'n' (Network) with the specified name.
-
-    // Note: We search from root '/' to capture any hierarchy.
-    // If multiple are found, we can attempt to filter by the datacenter name provided by user.
-
     try {
-        const findCmd = `find / -type n -name "${network}"`;
-        const findOutput = await runGovc(findCmd, { url, username, password });
+        // Strategy: 
+        // 1. Try to find the network path by listing ALL networks and filtering in JS.
+        //    (User reported `govc find / -type n -name` failed, so we grab all and filter).
 
-        if (!findOutput) {
-            return res.status(404).json({ error: `Network '${network}' not found.` });
+        console.log(`Searching for network '${network}' in datacenter '${datacenter}'...`);
+        const allNetworksRaw = await runGovc(`find / -type n`, { url, username, password });
+
+        if (!allNetworksRaw) {
+            throw new Error("No networks found in vCenter (govc find returned empty)");
         }
 
-        const paths = findOutput.split('\n').filter(p => p.trim() !== '');
+        const allPaths = allNetworksRaw.split('\n').filter(p => p.trim() !== '');
 
-        // Strategy: Filter paths that contain the datacenter name (if provided).
-        // User's DC might be "CTRLS UAT", and path might be "/CtrlS-BANk UAT/CTRLS UAT/..."
+        // Filter: Path must end with /NetworkName
+        // Normalize checking by trimming slashes?
+        // Path matches if specific segment is network name.
+        const matches = allPaths.filter(path => {
+            const parts = path.split('/');
+            const last = parts[parts.length - 1];
+            return last === network;
+        });
+
         let targetPath = '';
-
-        if (paths.length === 1) {
-            targetPath = paths[0];
+        if (matches.length === 0) {
+            return res.status(404).json({ error: `Network '${network}' not found in any datacenter.` });
+        } else if (matches.length === 1) {
+            targetPath = matches[0];
         } else {
-            // Fuzzy match: Look for path containing the Datacenter string
-            const matched = paths.filter(p => p.includes(datacenter));
-            if (matched.length > 0) {
-                // If still multiple, take the first one or logic to pick shorter/longer? 
-                targetPath = matched[0];
+            // Multiple matches (same network name in different DCs)
+            // Filter by Datacenter name in path
+            // e.g. path: /Folder/DC/network/NET
+            const dcMatches = matches.filter(path => path.includes(datacenter));
+            if (dcMatches.length > 0) {
+                targetPath = dcMatches[0];
+                if (dcMatches.length > 1) {
+                    console.log("Warning: Multiple networks matched both name and DC. Using first.");
+                }
             } else {
-                // Fallback: Just take the first valid network found if strict matching fails?
-                // Or error out? Let's take first for now but warn.
-                console.log("Multiple networks found, none matched DC hint. Using first.");
-                targetPath = paths[0];
+                // Return first if no DC match found? Or error?
+                console.log("Network found but Datacenter part didn't match. Using first found.");
+                targetPath = matches[0];
             }
         }
 
-        console.log(`Found Network Path: ${targetPath}`);
+        console.log(`Resolved Network Path: ${targetPath}`);
 
-        // Step 2: Get ID using the found path
-        // We quote the targetPath to handle spaces safely.
-        const lsCmd = `ls -i "${targetPath}"`;
-        const lsOutput = await runGovc(lsCmd, { url, username, password });
+        // Step 2: ls -i on the resolved path
+        // We need to escape spaces in the path for the shell command
+        // Since we got the path from govc find, it might contain spaces like "CTRLS UAT".
+        // Use proper escaping.
+        const finalPathEscaped = escapeSpaces(targetPath);
+
+        // Using "ls -i" with backslash escaped path (no quotes) as user prefers
+        const lsOutput = await runGovc(`ls -i ${finalPathEscaped}`, { url, username, password });
 
         const firstToken = lsOutput.split(/\s+/)[0];
         res.json({ dpgId: firstToken });
 
     } catch (err) {
-        res.status(500).json({ error: maskPassword(err.stderr || err.error?.message || 'Failed') });
+        const msg = err.error?.message || err.stderr || 'Failed to fetch DPG ID';
+        res.status(500).json({ error: maskPassword(msg) });
     }
 });
 
@@ -110,58 +129,40 @@ app.post('/api/check-datastore', async (req, res) => {
         return res.status(400).json({ error: 'Missing required fields' });
     }
 
+    // Method: User verified `govc datastore.info -json -dc="DC" "DS"` works.
+    let dcArg = '';
+    if (datacenter) {
+        dcArg = `-dc=${escapeShell(datacenter)}`;
+    }
+    const dsArg = escapeShell(datastore);
+
     try {
-        // Step 1: Find datastore path dynamically
-        // -type d (Datastore)
-        const findCmd = `find / -type d -name "${datastore}"`;
-        const findOutput = await runGovc(findCmd, { url, username, password });
-
-        if (!findOutput) {
-            return res.status(404).json({ error: `Datastore '${datastore}' not found.` });
-        }
-
-        const paths = findOutput.split('\n').filter(p => p.trim() !== '');
-        let targetPath = '';
-
-        if (paths.length === 1) {
-            targetPath = paths[0];
-        } else {
-            const matched = paths.filter(p => p.includes(datacenter));
-            targetPath = matched.length > 0 ? matched[0] : paths[0];
-        }
-
-        console.log(`Found Datastore Path: ${targetPath}`);
-
-        // Step 2: Get Info using full path (no -dc needed if full path used)
-        const infoCmd = `datastore.info -json "${targetPath}"`;
-        const jsonOutput = await runGovc(infoCmd, { url, username, password });
+        const jsonOutput = await runGovc(`datastore.info -json ${dcArg} ${dsArg}`, { url, username, password });
 
         const data = JSON.parse(jsonOutput);
 
-        // Step 3: Parse properly based on User's provided JSON structure
-        // structure: { datastores: [ { summary: { freeSpace: ..., capacity: ... } } ] }
-
+        // Parse Logic matching User's provided JSON
         let dsEntry = null;
         if (data.datastores && data.datastores.length > 0) {
             dsEntry = data.datastores[0];
         } else {
-            dsEntry = data; // Fallback
+            dsEntry = data;
         }
 
-        // Check 'summary' first (User's case)
+        // Access via summary (Preferred per user log) -> info -> root
         let free = undefined;
         let capacity = undefined;
         let name = dsEntry.name || datastore;
 
+        // Check summary.freeSpace (User example has this)
         if (dsEntry.summary) {
             free = dsEntry.summary.freeSpace;
             capacity = dsEntry.summary.capacity;
             name = dsEntry.summary.name || name;
         }
-        // Fallback to previous logic 'info' or direct fields just in case
         else if (dsEntry.info) {
-            free = dsEntry.info.freeSpace;
-            capacity = dsEntry.info.capacity; // warning: check field names for 'info'
+            free = dsEntry.info.freeSpace || dsEntry.info.free;
+            capacity = dsEntry.info.capacity;
         }
         else {
             free = dsEntry.free;
@@ -169,7 +170,10 @@ app.post('/api/check-datastore', async (req, res) => {
         }
 
         if (typeof free === 'undefined') {
-            return res.status(500).json({ error: 'Could not find freeSpace/capacity in response' });
+            // Debug log if parsing fails
+            console.log("JSON Response keys:", Object.keys(dsEntry));
+            if (dsEntry.summary) console.log("Summary keys:", Object.keys(dsEntry.summary));
+            return res.status(500).json({ error: 'Could not find capacity/freeSpace fields in response' });
         }
 
         res.json({
@@ -184,7 +188,8 @@ app.post('/api/check-datastore', async (req, res) => {
         if (err instanceof SyntaxError) {
             return res.status(500).json({ error: 'Failed to parse JSON output' });
         }
-        res.status(500).json({ error: maskPassword(err.stderr || err.error?.message || 'Failed') });
+        const msg = err.error?.message || err.stderr || 'Failed to check datastore';
+        res.status(500).json({ error: maskPassword(msg) });
     }
 });
 
