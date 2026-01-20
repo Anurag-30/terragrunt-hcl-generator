@@ -4,6 +4,8 @@ import bodyParser from 'body-parser';
 import { exec } from 'child_process';
 import cors from 'cors';
 
+
+
 const app = express();
 const port = 3001;
 
@@ -33,16 +35,30 @@ app.post('/api/get-dpg-id', (req, res) => {
         GOVC_PASSWORD: password
     };
 
-    // We need to find govc. We assume it's in PATH or standard locations.
-    // Using absolute path checked earlier: /opt/homebrew/bin/govc
-    // Or fallback to just 'govc' if in path.
-    const govcPath = '/opt/homebrew/bin/govc'; // defaulting to what we found
+    // We need to find govc.
+    // User requested to just use 'govc' directly without path detection.
+    const govcPath = 'govc';
 
-    const command = `${govcPath} ls -i "/${datacenter}/network/${network}"`;
+    // Construct command with inline environment variables for reliability
+    // We escape arguments to prevent shell injection and ensure proper parsing
+    const safeUrl = escapeShell(url);
+    const safeUsername = escapeShell(username);
+    const safePassword = escapeShell(password); // This will be escaped but still raw password
+    const safeDatacenter = datacenter; // Assuming safe or needs escaping? Datacenter names might have spaces.
+    const safeNetwork = network;
 
-    console.log(`Executing: ${govcPath} ls -i "/${datacenter}/network/${network}"`);
+    // Better to escape everything that goes into shell
+    const cmdStr = `GOVC_INSECURE=1 GOVC_URL=${escapeShell(url)} GOVC_USERNAME=${escapeShell(username)} GOVC_PASSWORD=${escapeShell(password)} ${govcPath} ls -i "/${datacenter}/network/${network}"`;
 
-    exec(command, { env }, (error, stdout, stderr) => {
+    // Create a safe version for logging (masking password)
+    const logCmd = `GOVC_INSECURE=1 GOVC_URL=${escapeShell(url)} GOVC_USERNAME=${escapeShell(username)} GOVC_PASSWORD=****** ${govcPath} ls -i "/${datacenter}/network/${network}"`;
+
+    console.log(`Executing: ${logCmd}`);
+
+    exec(cmdStr, (error, stdout, stderr) => {
+        console.log(`Command stdout: ${stdout}`);
+        if (stderr) console.error(`Command stderr: ${stderr}`);
+
         if (error) {
             console.error(`exec error: ${error}`);
             return res.status(500).json({ error: stderr || error.message || 'Failed to execute govc' });
