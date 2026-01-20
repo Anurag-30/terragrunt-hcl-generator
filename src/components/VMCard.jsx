@@ -22,7 +22,7 @@ function VMCard({ vm, index, updateVM, removeVM, isOnly, serverType, onDBSizeCha
 
     const handleFetchDPG = async () => {
         if (!fsCredentials.password) {
-            setDpgError("Password required above");
+            alert("Password required above");
             return;
         }
         setDpgLoading(true);
@@ -37,28 +37,23 @@ function VMCard({ vm, index, updateVM, removeVM, isOnly, serverType, onDBSizeCha
                     username: fsCredentials.username,
                     password: fsCredentials.password,
                     datacenter: vm.datacenter,
-                    network: vm.dpg_id // Using the input as the network name to search? 
-                    // User Request: "compute dpgid... execute command... get value"
-                    // govc ls -i /<dc>/network/<networkname>
-                    // So we need a "Network Name" input distinct from "DPG ID".
-                    // But currently we only have one field `dpg_id`. 
-                    // Assuming the user enters the NAME in `dpg_id` field, and we replace it with ID?
-                    // Or we add a separate "Network Name" field?
-                    // Let's assume the field currently holds the ID, but user wants to put Name -> Fetch -> Get ID.
+                    network: vm.dpg_id
                 })
             });
 
             const data = await response.json();
             if (data.error) {
+                // Show popup instead of overwriting field
+                alert("Error fetching DPG ID: " + data.error);
                 setDpgError(data.error);
-                // "if error just put it as error while computing in those fields"
-                handleChange('dpg_id', "Error: " + data.error);
             } else {
                 handleChange('dpg_id', data.dpgId);
+                setDpgError('');
             }
         } catch (e) {
+            // Show popup instead of overwriting field
+            alert("Network Error: Backend unreachable");
             setDpgError("Network Error");
-            handleChange('dpg_id', "Error: Network / Backend unreachable");
         } finally {
             setDpgLoading(false);
         }
@@ -246,7 +241,19 @@ function VMCard({ vm, index, updateVM, removeVM, isOnly, serverType, onDBSizeCha
                                     <div style={{ flex: '0 0 80px' }}><label>Size</label><input type="number" value={disk.size} onChange={e => updateDisk(i, 'size', e.target.value)} style={{ width: '80px' }} /></div>
                                     <div style={{ flex: '1' }}><label>Mount</label><input value={disk.mount_dir} onChange={e => updateDisk(i, 'mount_dir', e.target.value)} /></div>
                                     <div style={{ flex: '1' }}><label>Label</label><input value={disk.label} onChange={e => updateDisk(i, 'label', e.target.value)} /></div>
-                                    <div style={{ flex: '1' }}><label>Datastore</label><input value={disk.datastore} onChange={e => updateDisk(i, 'datastore', e.target.value)} /></div>
+                                    <div style={{ flex: '1.5' }}>
+                                        <label>Datastore</label>
+                                        <div className="flex" style={{ gap: '0.5rem' }}>
+                                            <input value={disk.datastore} onChange={e => updateDisk(i, 'datastore', e.target.value)} />
+                                            <button
+                                                className="secondary"
+                                                style={{ whiteSpace: 'nowrap', fontSize: '0.7rem', padding: '0.25rem 0.5rem' }}
+                                                onClick={() => handleCheckDatastore(disk.datastore)}
+                                            >
+                                                Cap
+                                            </button>
+                                        </div>
+                                    </div>
 
                                     {/* Extra fields shown only if present or expanded? To keep UI clean, maybe show a "Details" toggle or just list them if they exist? */}
                                     {/* For DB, show oracle/vg names if they exist */}

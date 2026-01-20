@@ -1,4 +1,3 @@
-
 import React, { useState, useEffect } from 'react';
 import './index.css';
 import { generateHCL } from './utils/hclGenerator';
@@ -77,6 +76,13 @@ function App() {
 
   const [generatedCode, setGeneratedCode] = useState('');
 
+  // Resizable sidebar state
+  const [sidebarWidth, setSidebarWidth] = useState(() => {
+    const saved = localStorage.getItem('hcl_sidebar_width');
+    return saved ? parseInt(saved) : 600;
+  });
+  const [isResizing, setIsResizing] = useState(false);
+
   // Credentials for Backend (Load from local storage too?)
   const [vcenterUsername, setVcenterUsername] = useState(() => localStorage.getItem('hcl_vc_user') || 'user@example.com');
   // Password usually shouldn't be auto-saved, but for convenience in this specific tool context:
@@ -95,6 +101,33 @@ function App() {
     localStorage.setItem('hcl_vc_user', vcenterUsername);
     localStorage.setItem('hcl_vc_pass', vcenterPassword);
   }, [vcenterUsername, vcenterPassword]);
+
+  useEffect(() => {
+    localStorage.setItem('hcl_sidebar_width', sidebarWidth.toString());
+  }, [sidebarWidth]);
+
+  // Handle resize
+  useEffect(() => {
+    const handleMouseMove = (e) => {
+      if (!isResizing) return;
+      const newWidth = window.innerWidth - e.clientX;
+      setSidebarWidth(Math.max(300, Math.min(1000, newWidth)));
+    };
+
+    const handleMouseUp = () => {
+      setIsResizing(false);
+    };
+
+    if (isResizing) {
+      document.addEventListener('mousemove', handleMouseMove);
+      document.addEventListener('mouseup', handleMouseUp);
+    }
+
+    return () => {
+      document.removeEventListener('mousemove', handleMouseMove);
+      document.removeEventListener('mouseup', handleMouseUp);
+    };
+  }, [isResizing]);
 
   const handleInputChange = (field, value) => {
     setFormData(prev => ({ ...prev, [field]: value }));
@@ -236,8 +269,8 @@ function App() {
         </div>
       </header>
 
-      <div className="grid" style={{ gridTemplateColumns: 'minmax(500px, 2fr) 1fr', gap: '2rem' }}>
-        <div className="space-y-8">
+      <div style={{ display: 'flex', gap: '0', position: 'relative' }}>
+        <div style={{ flex: 1, minWidth: 0, paddingRight: '1rem' }}>
 
           <section className="card">
             <h2>Global Configuration</h2>
@@ -281,7 +314,24 @@ function App() {
 
         </div>
 
-        <div>
+        {/* Resize Handle */}
+        <div
+          onMouseDown={() => setIsResizing(true)}
+          style={{
+            width: '8px',
+            cursor: 'col-resize',
+            backgroundColor: isResizing ? 'var(--primary-color)' : 'var(--surface-accent)',
+            transition: 'background-color 0.2s',
+            flexShrink: 0,
+            position: 'relative',
+            zIndex: 10
+          }}
+          onMouseEnter={(e) => e.currentTarget.style.backgroundColor = 'var(--primary-color)'}
+          onMouseLeave={(e) => !isResizing && (e.currentTarget.style.backgroundColor = 'var(--surface-accent)')}
+        />
+
+        {/* Resizable Sidebar */}
+        <div style={{ width: `${sidebarWidth}px`, flexShrink: 0 }}>
           <div className="card sticky-top" style={{ position: 'sticky', top: '2rem' }}>
             <div className="flex justify-between mb-4">
               <h2>Preview</h2>
