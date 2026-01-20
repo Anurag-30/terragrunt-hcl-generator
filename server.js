@@ -2,6 +2,7 @@
 import express from 'express';
 import bodyParser from 'body-parser';
 import { exec } from 'child_process';
+import { promises as fs } from 'fs'; // Unused but kept if needed
 import cors from 'cors';
 
 
@@ -27,7 +28,6 @@ const maskPassword = (str) => {
     return str.replace(/GOVC_PASSWORD=["']?([^"'\s]+)["']?/g, 'GOVC_PASSWORD=******');
 };
 
-// Helper to run govc command with promise
 const runGovc = (commandStr, envVars) => {
     return new Promise((resolve, reject) => {
         const { url, username, password } = envVars;
@@ -38,11 +38,16 @@ const runGovc = (commandStr, envVars) => {
 
         console.log(`Executing: ${logCmd}`);
 
-        // Increase maxBuffer to 10MB to handle large find outputs
-        exec(fullCmd, { maxBuffer: 1024 * 1024 * 10 }, (error, stdout, stderr) => {
+        // Timeout 30s to prevent hanging
+        exec(fullCmd, { maxBuffer: 1024 * 1024 * 10, timeout: 30000 }, (error, stdout, stderr) => {
             if (error) {
                 console.error(`Error: ${maskPassword(error.toString())}`);
                 if (stderr) console.error(`Stderr: ${maskPassword(stderr)}`);
+                // Check for EOF or Connection errors
+                const msg = error.message || '';
+                if (msg.includes('EOF') || msg.includes('connection reset')) {
+                    return reject({ error, stderr, isNetworkError: true });
+                }
                 return reject({ error, stderr });
             }
             resolve(stdout.trim());
@@ -58,67 +63,55 @@ app.post('/api/get-dpg-id', async (req, res) => {
     }
 
     try {
-        // Strategy: 
-        // 1. Try to find the network path by listing ALL networks and filtering in JS.
-        //    (User reported `govc find / -type n -name` failed, so we grab all and filter).
+        // Step 1: Find the Datacenter Object Path
+        // We use `-type Datacenter` which is much faster than `-type n` (Network) on root
+        // We filter by name in the find command itself to limit results
+        console.log(`Locating Datacenter '${datacenter}'...`);
 
-        console.log(`Searching for network '${network}' in datacenter '${datacenter}'...`);
-        const allNetworksRaw = await runGovc(`find / -type n`, { url, username, password });
+        // Escape the datacenter name for the search query if it has spaces
+        // find command expects arguments, standard shell escaping applies to the name arg
+        // But `find -name` pattern: we can quote it.
+        const dcFindCmd = `find / -type Datacenter -name "${datacenter}"`;
+        const dcOutput = await runGovc(dcFindCmd, { url, username, password });
 
-        if (!allNetworksRaw) {
-            throw new Error("No networks found in vCenter (govc find returned empty)");
+        if (!dcOutput) {
+            return res.status(404).json({ error: `Datacenter '${datacenter}' not found.` });
         }
 
-        const allPaths = allNetworksRaw.split('\n').filter(p => p.trim() !== '');
+        // Could match multiple? e.g. /Folder/DC and /Other/DC
+        // Usually distinct, but take first.
+        const dcPath = dcOutput.split('\n')[0].trim();
+        console.log(`Found DC Path: ${dcPath}`);
 
-        // Filter: Path must end with /NetworkName
-        // Normalize checking by trimming slashes?
-        // Path matches if specific segment is network name.
-        const matches = allPaths.filter(path => {
-            const parts = path.split('/');
-            const last = parts[parts.length - 1];
-            return last === network;
-        });
+        // Step 2: Find Network *inside* that Datacenter
+        // This scopes the search significantly, avoiding EOF from full scan
+        console.log(`Locating Network '${network}' in ${dcPath}...`);
 
-        let targetPath = '';
-        if (matches.length === 0) {
-            return res.status(404).json({ error: `Network '${network}' not found in any datacenter.` });
-        } else if (matches.length === 1) {
-            targetPath = matches[0];
-        } else {
-            // Multiple matches (same network name in different DCs)
-            // Filter by Datacenter name in path
-            // e.g. path: /Folder/DC/network/NET
-            const dcMatches = matches.filter(path => path.includes(datacenter));
-            if (dcMatches.length > 0) {
-                targetPath = dcMatches[0];
-                if (dcMatches.length > 1) {
-                    console.log("Warning: Multiple networks matched both name and DC. Using first.");
-                }
-            } else {
-                // Return first if no DC match found? Or error?
-                console.log("Network found but Datacenter part didn't match. Using first found.");
-                targetPath = matches[0];
-            }
+        // We search recursively under dcPath for type Network
+        // Enclose dcPath in quotes to handle spaces
+        const netFindCmd = `find "${dcPath}" -type n -name "${network}"`;
+        const netOutput = await runGovc(netFindCmd, { url, username, password });
+
+        if (!netOutput) {
+            return res.status(404).json({ error: `Network '${network}' not found in DC '${datacenter}'.` });
         }
 
-        console.log(`Resolved Network Path: ${targetPath}`);
+        const netPath = netOutput.split('\n')[0].trim();
+        console.log(`Found Network Path: ${netPath}`);
 
-        // Step 2: ls -i on the resolved path
-        // We need to escape spaces in the path for the shell command
-        // Since we got the path from govc find, it might contain spaces like "CTRLS UAT".
-        // Use proper escaping.
-        const finalPathEscaped = escapeSpaces(targetPath);
-
-        // Using "ls -i" with backslash escaped path (no quotes) as user prefers
-        const lsOutput = await runGovc(`ls -i ${finalPathEscaped}`, { url, username, password });
+        // Step 3: Get DPG ID (ls -i)
+        // Quote the path for safety
+        const lsCmd = `ls -i "${netPath}"`;
+        const lsOutput = await runGovc(lsCmd, { url, username, password });
 
         const firstToken = lsOutput.split(/\s+/)[0];
         res.json({ dpgId: firstToken });
 
     } catch (err) {
-        const msg = err.error?.message || err.stderr || 'Failed to fetch DPG ID';
-        res.status(500).json({ error: maskPassword(msg) });
+        const msg = err.stderr || err.error?.message || 'Failed to fetch DPG ID';
+        res.status(500).json({
+            error: maskPassword(msg) + (err.isNetworkError && " (Network/VCenter connection unstable)")
+        });
     }
 });
 
@@ -129,7 +122,7 @@ app.post('/api/check-datastore', async (req, res) => {
         return res.status(400).json({ error: 'Missing required fields' });
     }
 
-    // Method: User verified `govc datastore.info -json -dc="DC" "DS"` works.
+    // Use verified -dc flag approach
     let dcArg = '';
     if (datacenter) {
         dcArg = `-dc=${escapeShell(datacenter)}`;
@@ -138,10 +131,8 @@ app.post('/api/check-datastore', async (req, res) => {
 
     try {
         const jsonOutput = await runGovc(`datastore.info -json ${dcArg} ${dsArg}`, { url, username, password });
-
         const data = JSON.parse(jsonOutput);
 
-        // Parse Logic matching User's provided JSON
         let dsEntry = null;
         if (data.datastores && data.datastores.length > 0) {
             dsEntry = data.datastores[0];
@@ -149,12 +140,10 @@ app.post('/api/check-datastore', async (req, res) => {
             dsEntry = data;
         }
 
-        // Access via summary (Preferred per user log) -> info -> root
         let free = undefined;
         let capacity = undefined;
         let name = dsEntry.name || datastore;
 
-        // Check summary.freeSpace (User example has this)
         if (dsEntry.summary) {
             free = dsEntry.summary.freeSpace;
             capacity = dsEntry.summary.capacity;
@@ -170,9 +159,6 @@ app.post('/api/check-datastore', async (req, res) => {
         }
 
         if (typeof free === 'undefined') {
-            // Debug log if parsing fails
-            console.log("JSON Response keys:", Object.keys(dsEntry));
-            if (dsEntry.summary) console.log("Summary keys:", Object.keys(dsEntry.summary));
             return res.status(500).json({ error: 'Could not find capacity/freeSpace fields in response' });
         }
 
@@ -188,8 +174,10 @@ app.post('/api/check-datastore', async (req, res) => {
         if (err instanceof SyntaxError) {
             return res.status(500).json({ error: 'Failed to parse JSON output' });
         }
-        const msg = err.error?.message || err.stderr || 'Failed to check datastore';
-        res.status(500).json({ error: maskPassword(msg) });
+        const msg = err.stderr || err.error?.message || 'Failed to check datastore';
+        res.status(500).json({
+            error: maskPassword(msg) + (err.isNetworkError ? " (Network/VCenter connection unstable)" : "")
+        });
     }
 });
 
